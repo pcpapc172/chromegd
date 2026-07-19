@@ -1,0 +1,57 @@
+{
+    "geode": "5.8.2",
+    "gd": {
+        "win": "2.2081"
+    },
+    "id": "pcpapc172.chromium-in-gd",
+    "name": "Chromium in GD",
+    "version": "v1.0.0",
+    "developer": "PCPAPC172",
+    "description": "A Chromium (CEF) browser rendered inside Geometry Dash with tabs, audio, microphone access, Discord support, and DevTools. Works in fullscreen.",
+    "early-load": true,
+    "tags": ["utility", "enhancement", "online"],
+    "resources": {
+        "files": ["cef-dist/*"]
+    },
+    "settings": {
+        "toggle-browser": {
+            "type": "button",
+            "name": "Browser",
+            "buttons": {
+                "toggle": "Open / Close"
+            }
+        },
+        "toggle-keybind": {
+            "type": "keybind",
+            "name": "Toggle Browser",
+            "default": ["Ctrl+F2"],
+            "description": "Show or hide the browser window.",
+            "category": "universal",
+            "allow-in-text-inputs": false
+        },
+        "home-page": {
+            "type": "string",
+            "name": "Home Page",
+            "default": "https://discord.com/app",
+            "description": "Page the first tab opens when the browser starts."
+        },
+        "new-tab-page": {
+            "type": "string",
+            "name": "New Tab Page",
+            "default": "https://www.google.com",
+            "description": "Page that newly opened tabs show. (Chrome's real new-tab page does not exist in the embedded browser, so Google is the closest equivalent.)"
+        },
+        "allow-microphone": {
+            "type": "bool",
+            "name": "Allow Microphone and Camera",
+            "default": true,
+            "description": "Automatically grants microphone/camera requests to pages you open. Disable this if you do not trust a site."
+        },
+        "keep-running-hidden": {
+            "type": "bool",
+            "name": "Keep Tabs Running While Hidden",
+            "default": true,
+            "description": "Keeps voice chat and audio alive when the browser frame is hidden."
+        }
+    }
+}

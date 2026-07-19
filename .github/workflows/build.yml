@@ -1,0 +1,43 @@
+name: Build Geode Mod
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # CEF is far too large to commit, so fetch the exact binary distribution
+      # the mod is built against and lay it out where CMakeLists expects it.
+      - name: Fetch CEF binary distribution
+        shell: pwsh
+        run: |
+          $url = "https://cef-builds.spotifycdn.com/cef_binary_150.0.11%2Bgb887805%2Bchromium-150.0.7871.115_windows64_minimal.tar.bz2"
+          Invoke-WebRequest -Uri $url -OutFile cef.tar.bz2
+          tar -xf cef.tar.bz2
+          $dir = Get-ChildItem -Directory -Filter "cef_binary_*" | Select-Object -First 1
+          Rename-Item -Path $dir.FullName -NewName "cef"
+
+      - name: Build mod
+        uses: geode-sdk/build-geode-mod@main
+        id: build
+        with:
+          target: Win64
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pcpapc172.chromium-in-gd-windows
+          path: ${{ steps.build.outputs.build-output }}
+          if-no-files-found: error
