@@ -7,6 +7,7 @@
 
 #include <include/cef_base.h>
 #include <include/cef_browser.h>
+#include <include/cef_context_menu_handler.h>
 #include <include/wrapper/cef_message_router.h>
 
 #include <cstdint>
@@ -73,6 +74,9 @@ public:
     void toggleMute();
     void openDevTools();
     void setBounds(RECT bounds);
+    // Full window rect (including chrome), client pixels. Used to block game
+    // input anywhere over the window, not just over the rendered page.
+    void setWindowBounds(RECT bounds);
     void setVisible(bool visible);
 
     // Copies the active tab's latest frame (BGRA, top-down) if it changed
@@ -86,6 +90,21 @@ public:
     [[nodiscard]] bool hasKeyboardFocus() const { return m_keyboardFocus; }
     // True when the browser is visible and the mouse cursor is over the page.
     [[nodiscard]] bool isCursorOverView() const;
+    // True when the browser is visible and the cursor is anywhere over the
+    // window (page or chrome).
+    [[nodiscard]] bool isCursorOverWindow() const;
+    // True while the browser window is open/visible on screen. Game keyboard
+    // and jump input are locked in this state so they don't leak to the game.
+    [[nodiscard]] bool isBrowserVisible() const { return m_visible; }
+
+    struct ContextMenuItem {
+        int commandId = 0;
+        std::string label;
+        bool enabled = true;
+        bool separator = false;
+    };
+    void contextMenuCommand(int commandId);
+    void contextMenuCancel();
 
     [[nodiscard]] size_t tabCount() const { return m_tabs.size(); }
     [[nodiscard]] size_t activeIndex() const { return m_active; }
@@ -97,6 +116,10 @@ public:
     void recordHistory(std::string const& url);
     [[nodiscard]] HWND parentWindow() const { return m_parent; }
     [[nodiscard]] float dpiScale() const;
+    // Physical pixels CEF paints per DIP. Higher than dpiScale so the page is
+    // rendered at a super-sampled resolution and downscaled when displayed,
+    // which keeps text/edges crisp instead of softly upscaled.
+    [[nodiscard]] float renderScale() const;
     [[nodiscard]] bool isAvailable() const { return m_cefStarted; }
     [[nodiscard]] std::string const& error() const { return m_error; }
 
@@ -104,8 +127,14 @@ public:
     // Return true if a middle-click at these client pixels was consumed
     // (e.g. it hit a tab button); set by BrowserWindow.
     std::function<bool(int, int)> onMiddleClick;
+    // A short download status line to show as an in-window toast.
+    std::function<void(std::string)> onDownloadNotice;
+    // Show a context menu at the given client-pixel position; set by
+    // BrowserWindow, which renders it in-game.
+    std::function<void(int clientX, int clientY, std::vector<ContextMenuItem>)> onContextMenu;
 
     void setPointerLocked(bool locked);
+    void logDebug(std::string const& line);  // TEMP: pause-key diagnostics
 
 private:
     friend class GdCefClient;
@@ -116,6 +145,8 @@ private:
     BrowserHost& operator=(BrowserHost const&) = delete;
 
     HWND findGameWindow() const;
+    void loadPersisted();
+    void saveDownloads();
     bool startCef();
     void installWndProcHook();
     void removeWndProcHook();
@@ -140,6 +171,7 @@ private:
 
     mutable std::mutex m_boundsMutex;
     RECT m_bounds{0, 0, 1, 1};
+    RECT m_windowBounds{0, 0, 1, 1};
     HCURSOR m_cursor = nullptr;
 
     bool m_visible = false;
@@ -158,6 +190,7 @@ private:
 
     std::vector<std::string> m_history;
     std::vector<DownloadInfo> m_downloads;
+    CefRefPtr<CefRunContextMenuCallback> m_contextCallback;
 
     std::vector<uint8_t> m_composeScratch;
 };

@@ -6,7 +6,10 @@
 
 #include "BrowserHost.hpp"
 
+#include <string>
 #include <vector>
+
+struct BrowserListRow;
 
 using namespace geode::prelude;
 
@@ -49,24 +52,43 @@ private:
     void onForward(CCObject*);
     void onReload(CCObject*);
     void onGo(CCObject*);
+    void onClearUrl(CCObject*);
+    void onCopyUrl(CCObject*);
     void onMute(CCObject*);
     void onMenu(CCObject*);
     void onDownloads(CCObject*);
     void onHistory(CCObject*);
     void onSettings(CCObject*);
     void onDevTools(CCObject*);
-    void showListPopup(char const* title, std::string body);
+    void showListPopup(char const* title, std::vector<BrowserListRow> rows);
+    void showContextMenu(int clientX, int clientY, std::vector<BrowserHost::ContextMenuItem> items);
+    void hideContextMenu();
+    void onContextItem(CCObject*);
 
     geode::NineSlice* m_background = nullptr;
     geode::NineSlice* m_border = nullptr;
+    CCClippingNode* m_topBar = nullptr;      // clips the fill to rounded top corners
+    CCLayerColor* m_topBarFill = nullptr;    // the indigo colour
+    CCScale9Sprite* m_topBarRound = nullptr; // stencil: rounded shape
+    CCLayerColor* m_topBarSquare = nullptr;  // stencil: squares off the bottom corners
     CCScale9Sprite* m_resizeHandle = nullptr;
     CCMenu* m_tabMenu = nullptr;
     CCMenu* m_toolMenu = nullptr;
     CCMenu* m_dropMenu = nullptr;   // the "..." dropdown
+    CCNode* m_contextMenu = nullptr;  // in-page right-click menu
     TextInput* m_address = nullptr;
+    CCMenuItemSpriteExtra* m_clearButton = nullptr;
     CCLabelBMFont* m_status = nullptr;
     CCMenuItemSpriteExtra* m_muteButton = nullptr;
+
+    std::string m_fullUrl;       // active tab's full URL
+    std::string m_addrDisplay;   // possibly-truncated text shown when unfocused
+    bool m_addrWasFocused = false;
+    bool m_addrCleared = false;  // X pressed: don't let focus-gain refill the URL
     CCSprite* m_spinner = nullptr;
+    CCLabelBMFont* m_toast = nullptr;
+
+    void showToast(std::string const& text);
 
     // Off-screen-rendered page, uploaded as a GL texture every frame.
     CCSprite* m_pageSprite = nullptr;

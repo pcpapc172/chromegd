@@ -6,6 +6,7 @@
 
 #include <include/cef_app.h>
 #include <include/cef_client.h>
+#include <include/cef_context_menu_handler.h>
 #include <include/cef_display_handler.h>
 #include <include/cef_download_handler.h>
 #include <include/cef_jsdialog_handler.h>
@@ -189,7 +190,8 @@ class GdCefClient final : public CefClient,
                           public CefLoadHandler,
                           public CefPermissionHandler,
                           public CefJSDialogHandler,
-                          public CefDownloadHandler {
+                          public CefDownloadHandler,
+                          public CefContextMenuHandler {
 public:
     explicit GdCefClient(std::shared_ptr<BrowserSurface> surface)
       : m_surface(std::move(surface)) {}
@@ -201,6 +203,37 @@ public:
     CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
     CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
     CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+    CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
+
+    // CEF's default context menu is a native popup that doesn't render in
+    // off-screen mode, so render our own in-game menu from the model instead.
+    bool RunContextMenu(
+        CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, CefRefPtr<CefContextMenuParams> params,
+        CefRefPtr<CefMenuModel> model, CefRefPtr<CefRunContextMenuCallback> callback
+    ) override {
+        std::vector<BrowserHost::ContextMenuItem> items;
+        for (size_t i = 0; i < model->GetCount(); ++i) {
+            BrowserHost::ContextMenuItem item;
+            item.separator = model->GetTypeAt(i) == MENUITEMTYPE_SEPARATOR;
+            item.commandId = model->GetCommandIdAt(i);
+            item.label = model->GetLabelAt(i).ToString();
+            item.enabled = model->IsEnabledAt(i);
+            if (!item.separator && item.label.empty()) continue;
+            items.push_back(std::move(item));
+        }
+        auto& host = BrowserHost::get();
+        auto bounds = host.boundsSnapshot();
+        float scale = host.dpiScale();
+        int clientX = bounds.left + static_cast<int>(params->GetXCoord() * scale);
+        int clientY = bounds.top + static_cast<int>(params->GetYCoord() * scale);
+        host.m_contextCallback = callback;
+        geode::queueInMainThread([clientX, clientY, items = std::move(items)] {
+            auto& h = BrowserHost::get();
+            if (h.onContextMenu) h.onContextMenu(clientX, clientY, items);
+            else h.contextMenuCancel();
+        });
+        return true;
+    }
 
     bool OnProcessMessageReceived(
         CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
@@ -241,7 +274,7 @@ public:
     bool GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo& info) override {
         CefRect view;
         GetViewRect(browser, view);
-        info.device_scale_factor = BrowserHost::get().dpiScale();
+        info.device_scale_factor = BrowserHost::get().renderScale();
         info.depth = 32;
         info.depth_per_component = 8;
         info.is_monochrome = 0;
@@ -271,7 +304,7 @@ public:
             // renderer to size itself again (we're already on the UI thread).
             CefRect view;
             GetViewRect(browser, view);
-            float scale = BrowserHost::get().dpiScale();
+            float scale = BrowserHost::get().renderScale();
             int expectedW = static_cast<int>(view.width * scale);
             int expectedH = static_cast<int>(view.height * scale);
             if (std::abs(width - expectedW) > 2 || std::abs(height - expectedH) > 2) {
@@ -285,7 +318,7 @@ public:
                 static_cast<uint8_t const*>(buffer), static_cast<uint8_t const*>(buffer) + size);
             m_surface->width = width;
             m_surface->height = height;
-            m_surface->scale = BrowserHost::get().dpiScale();
+            m_surface->scale = BrowserHost::get().renderScale();
         } else {
             m_surface->popupPixels.assign(
                 static_cast<uint8_t const*>(buffer), static_cast<uint8_t const*>(buffer) + size);
@@ -456,6 +489,13 @@ public:
     // -- CefDownloadHandler: save to the OS Downloads folder without a native
     // save dialog, and report progress to the in-game downloads list. --
 
+    // Chrome extensions (.crx) are unsupported by CEF's off-screen runtime and
+    // installing one crashes Chromium, so refuse those downloads outright.
+    bool CanDownload(CefRefPtr<CefBrowser>, CefString const& url, CefString const&) override {
+        auto u = url.ToString();
+        return u.find(".crx") == std::string::npos;
+    }
+
     bool OnBeforeDownload(
         CefRefPtr<CefBrowser>, CefRefPtr<CefDownloadItem> item,
         CefString const& suggestedName, CefRefPtr<CefBeforeDownloadCallback> callback
@@ -486,7 +526,13 @@ private:
     void pushDownload(CefRefPtr<CefDownloadItem> item, std::string name, std::string path) {
         BrowserHost::DownloadInfo info;
         info.id = item->GetId();
-        info.name = name;
+        // GetSuggestedFileName can be empty in later updates; fall back to the
+        // path's filename so the entry never shows up blank.
+        if (name.empty() && !path.empty()) {
+            info.name = std::filesystem::path(path).filename().string();
+        } else {
+            info.name = name;
+        }
         info.path = path;
         info.percent = item->GetPercentComplete();
         info.complete = item->IsComplete();
@@ -517,6 +563,8 @@ HWND BrowserHost::findGameWindow() const {
 bool BrowserHost::initialize() {
     if (m_cefStarted) return true;
     if (m_cefFailed) return false;
+
+    if (m_history.empty() && m_downloads.empty()) loadPersisted();
 
     m_parent = findGameWindow();
     if (!m_parent) {
@@ -753,6 +801,11 @@ void BrowserHost::setBounds(RECT bounds) {
     }
 }
 
+void BrowserHost::setWindowBounds(RECT bounds) {
+    std::scoped_lock lock(m_boundsMutex);
+    m_windowBounds = bounds;
+}
+
 RECT BrowserHost::boundsSnapshot() const {
     std::scoped_lock lock(m_boundsMutex);
     return m_bounds;
@@ -762,6 +815,11 @@ float BrowserHost::dpiScale() const {
     if (!m_parent) return 1.f;
     UINT dpi = GetDpiForWindow(m_parent);
     return dpi ? static_cast<float>(dpi) / 96.f : 1.f;
+}
+
+float BrowserHost::renderScale() const {
+    // 2x super-sampling: sharp text with a manageable upload size.
+    return dpiScale() * 2.0f;
 }
 
 void BrowserHost::setVisible(bool visible) {
@@ -817,11 +875,45 @@ bool BrowserHost::copyActiveFrame(std::vector<uint8_t>& out, int& width, int& he
     return true;
 }
 
+void BrowserHost::loadPersisted() {
+    m_history = Mod::get()->getSavedValue<std::vector<std::string>>("browser-history", {});
+    auto names = Mod::get()->getSavedValue<std::vector<std::string>>("dl-names", {});
+    auto paths = Mod::get()->getSavedValue<std::vector<std::string>>("dl-paths", {});
+    for (size_t i = 0; i < names.size(); ++i) {
+        DownloadInfo d;
+        d.id = 0;  // past downloads have no live id
+        d.name = names[i];
+        d.path = i < paths.size() ? paths[i] : "";
+        d.percent = 100;
+        d.complete = true;
+        m_downloads.push_back(d);
+    }
+}
+
+void BrowserHost::saveDownloads() {
+    std::vector<std::string> names, paths;
+    for (auto const& d : m_downloads) { names.push_back(d.name); paths.push_back(d.path); }
+    Mod::get()->setSavedValue("dl-names", names);
+    Mod::get()->setSavedValue("dl-paths", paths);
+}
+
 void BrowserHost::updateDownload(DownloadInfo const& info) {
     auto it = std::find_if(m_downloads.begin(), m_downloads.end(),
-        [&](auto const& d) { return d.id == info.id; });
-    if (it == m_downloads.end()) m_downloads.push_back(info);
-    else *it = info;
+        [&](auto const& d) { return d.id == info.id && d.id != 0; });
+    auto notice = [this](std::string msg) { if (onDownloadNotice) onDownloadNotice(std::move(msg)); };
+    if (it == m_downloads.end()) {
+        m_downloads.push_back(info);
+        if (info.complete) notice("Downloaded " + info.name);
+        else notice("Downloading " + info.name + "...");
+    } else {
+        bool wasComplete = it->complete;
+        auto name = info.name.empty() ? it->name : info.name;  // keep known name
+        *it = info;
+        it->name = name;
+        if (info.complete && !wasComplete) notice("Downloaded " + name);
+        else if (info.canceled) notice("Download canceled");
+    }
+    saveDownloads();
     notify();
 }
 
@@ -830,6 +922,7 @@ void BrowserHost::recordHistory(std::string const& url) {
     if (!m_history.empty() && m_history.back() == url) return;
     m_history.push_back(url);
     if (m_history.size() > 200) m_history.erase(m_history.begin());
+    Mod::get()->setSavedValue("browser-history", m_history);
 }
 
 BrowserHost::Tab const* BrowserHost::activeTab() const {
@@ -850,6 +943,20 @@ bool BrowserHost::isCursorOverView() const {
     GetCursorPos(&point);
     ScreenToClient(m_parent, &point);
     return pointInView(point.x, point.y);
+}
+
+bool BrowserHost::isCursorOverWindow() const {
+    if (!m_visible || !m_parent) return false;
+    POINT point{};
+    GetCursorPos(&point);
+    ScreenToClient(m_parent, &point);
+    RECT b;
+    {
+        std::scoped_lock lock(m_boundsMutex);
+        b = m_windowBounds;
+    }
+    return point.x >= b.left && point.x < b.right
+        && point.y >= b.top && point.y < b.bottom;
 }
 
 bool BrowserHost::pointInView(int clientX, int clientY) const {
@@ -911,6 +1018,7 @@ void BrowserHost::setPointerLocked(bool locked) {
 }
 
 void BrowserHost::setKeyboardFocus(bool focused) {
+    debugLog(std::string("setKeyboardFocus ") + (focused ? "true" : "false"));
     if (!focused && m_pointerLocked) {
         // Tell the page to drop its (faked) pointer lock, then stop emulation.
         if (auto const* tab = activeTab(); tab && tab->browser) {
@@ -1050,11 +1158,23 @@ LRESULT BrowserHost::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             return 0;
         }
 
-        case WM_LBUTTONDOWN: {
-            // Clicking anywhere outside the page gives the keyboard back to GD.
-            if (!pointInView(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) setKeyboardFocus(false);
+        case WM_XBUTTONDOWN: {
+            // Mouse side buttons navigate the browser (back / forward) when the
+            // cursor is over the page.
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (pointInView(point.x, point.y)) {
+                WORD button = GET_XBUTTON_WPARAM(wParam);
+                if (button == XBUTTON1) goBack();
+                else if (button == XBUTTON2) goForward();
+                handled = true;
+                return TRUE;
+            }
             return 0;
         }
+
+        // Keyboard focus is managed by the cocos touch handler (which knows the
+        // whole window, not just the page rect), so WM_LBUTTONDOWN does nothing
+        // here — dropping focus on toolbar clicks was releasing it too eagerly.
 
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL: {
@@ -1147,6 +1267,24 @@ std::string BrowserHost::normalizeAddress(std::string text) const {
 
 void BrowserHost::notify() {
     if (onStateChanged) onStateChanged();
+}
+
+void BrowserHost::logDebug(std::string const& line) {
+    debugLog(line);
+}
+
+void BrowserHost::contextMenuCommand(int commandId) {
+    if (auto cb = m_contextCallback) {
+        runOnUI([cb, commandId] { cb->Continue(commandId, EVENTFLAG_NONE); });
+        m_contextCallback = nullptr;
+    }
+}
+
+void BrowserHost::contextMenuCancel() {
+    if (auto cb = m_contextCallback) {
+        runOnUI([cb] { cb->Cancel(); });
+        m_contextCallback = nullptr;
+    }
 }
 
 #endif
