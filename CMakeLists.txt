@@ -25,30 +25,35 @@ if (NOT EXISTS "${CEF_ROOT}/include/cef_version.h")
     message(FATAL_ERROR "CEF binary distribution not found at ${CEF_ROOT}")
 endif()
 
-# Match the CRT used by Geode mods (dynamic runtime).
-set(CEF_RUNTIME_LIBRARY_FLAG "/MD" CACHE STRING "" FORCE)
-set(USE_SANDBOX OFF CACHE BOOL "" FORCE)
-list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
-find_package(CEF REQUIRED)
-add_subdirectory(${CEF_LIBCEF_DLL_WRAPPER_PATH} libcef_dll_wrapper)
+# Build the libcef_dll wrapper ourselves rather than via CEF's own CMake: that
+# CMake hard-codes MSVC-style flags (/MP, /W4, /MD ...) which fail under the
+# clang toolchain Geode uses on CI. Compiling it here inherits whatever
+# compiler is active (MSVC locally, clang on CI).
+file(GLOB_RECURSE CEF_WRAPPER_SOURCES CONFIGURE_DEPENDS "${CEF_ROOT}/libcef_dll/*.cc")
+add_library(libcef_dll_wrapper STATIC ${CEF_WRAPPER_SOURCES})
+target_include_directories(libcef_dll_wrapper PUBLIC "${CEF_ROOT}")
+target_compile_features(libcef_dll_wrapper PRIVATE cxx_std_17)
+target_compile_definitions(libcef_dll_wrapper PRIVATE
+    WRAPPING_CEF_SHARED NOMINMAX WIN32 WIN32_LEAN_AND_MEAN UNICODE _UNICODE
+    WINVER=0x0A00 _WIN32_WINNT=0x0A00
+)
 
-target_include_directories(${PROJECT_NAME} PRIVATE "${CEF_ROOT}")
-target_link_libraries(${PROJECT_NAME}
+set(CEF_LIBRARIES
     libcef_dll_wrapper
     "${CEF_ROOT}/Release/libcef.lib"
-    delayimp
 )
+
+target_include_directories(${PROJECT_NAME} PRIVATE "${CEF_ROOT}")
+target_link_libraries(${PROJECT_NAME} ${CEF_LIBRARIES} delayimp)
 # libcef.dll lives in the mod's resources dir, not next to GD.exe; the host
 # loads it by full path before the first CEF call resolves the delay-load.
-target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:libcef.dll")
+# LINKER: keeps the flag correct across the MSVC and clang drivers.
+target_link_options(${PROJECT_NAME} PRIVATE "LINKER:/DELAYLOAD:libcef.dll")
 
 # Subprocess helper (renderer/GPU processes).
 add_executable(chromium-in-gd-helper WIN32 helper/helper_main.cpp)
 target_include_directories(chromium-in-gd-helper PRIVATE "${CEF_ROOT}")
-target_link_libraries(chromium-in-gd-helper
-    libcef_dll_wrapper
-    "${CEF_ROOT}/Release/libcef.lib"
-)
+target_link_libraries(chromium-in-gd-helper ${CEF_LIBRARIES})
 add_dependencies(${PROJECT_NAME} chromium-in-gd-helper)
 
 # Stage every CEF runtime file, flattened, into cef-dist/. mod.json packages
