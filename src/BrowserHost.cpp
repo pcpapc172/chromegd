@@ -624,6 +624,12 @@ bool BrowserHost::startCef() {
     CefString(&settings.resources_dir_path) = resources.wstring();
     CefString(&settings.locales_dir_path) = resources.wstring();
     CefString(&settings.locale) = "en-US";
+    // Present as a plain desktop Chrome (matching the embedded Chromium
+    // version) so sites don't serve a degraded/blocked experience to what
+    // they'd otherwise fingerprint as an embedded browser.
+    CefString(&settings.user_agent) =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
     CefString(&settings.cache_path) = (Mod::get()->getSaveDir() / "chromium-profile").wstring();
     CefString(&settings.log_file) = (Mod::get()->getSaveDir() / "cef.log").wstring();
 
@@ -981,6 +987,10 @@ void BrowserHost::sendMouseButton(int clientX, int clientY, bool up, int clickCo
     runOnUI([browser = tab->browser, event, up, clickCount] {
         browser->GetHost()->SendMouseClickEvent(event, MBT_LEFT, up, clickCount);
     });
+    // Seed / clear the drag origin so intermediate moves interpolate from here.
+    m_dragLastX = px;
+    m_dragLastY = py;
+    m_dragActive = !up;
 }
 
 void BrowserHost::sendMouseDrag(int clientX, int clientY) {
@@ -990,13 +1000,28 @@ void BrowserHost::sendMouseDrag(int clientX, int clientY) {
     if (!tab || !tab->browser) return;
     auto bounds = boundsSnapshot();
     float scale = dpiScale();
-    CefMouseEvent event;
-    event.x = static_cast<int>((clientX - bounds.left) / scale);
-    event.y = static_cast<int>((clientY - bounds.top) / scale);
-    event.modifiers = currentModifiers() | EVENTFLAG_LEFT_MOUSE_BUTTON;
-    runOnUI([browser = tab->browser, event] {
-        browser->GetHost()->SendMouseMoveEvent(event, false);
-    });
+    auto browser = tab->browser;
+
+    // Interpolate intermediate moves between the last position and this one so
+    // a quick drag produces a continuous path. A single big jump reads as a
+    // teleport, which some sites' slider/drag captchas reject.
+    int fromX = m_dragActive ? m_dragLastX : clientX;
+    int fromY = m_dragActive ? m_dragLastY : clientY;
+    int dx = clientX - fromX, dy = clientY - fromY;
+    int dist = std::max(std::abs(dx), std::abs(dy));
+    int steps = std::clamp(dist / 6, 1, 24);
+    for (int i = 1; i <= steps; ++i) {
+        CefMouseEvent event;
+        event.x = static_cast<int>((fromX + dx * i / steps - bounds.left) / scale);
+        event.y = static_cast<int>((fromY + dy * i / steps - bounds.top) / scale);
+        event.modifiers = currentModifiers() | EVENTFLAG_LEFT_MOUSE_BUTTON;
+        runOnUI([browser, event] {
+            browser->GetHost()->SendMouseMoveEvent(event, false);
+        });
+    }
+    m_dragLastX = clientX;
+    m_dragLastY = clientY;
+    m_dragActive = true;
 }
 
 void BrowserHost::setPointerLocked(bool locked) {

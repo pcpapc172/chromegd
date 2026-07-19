@@ -174,6 +174,12 @@ private:
     RECT m_windowBounds{0, 0, 1, 1};
     HCURSOR m_cursor = nullptr;
 
+    // Last forwarded drag position (client px) so drags can be interpolated
+    // into a continuous trajectory rather than sparse jumps.
+    int m_dragLastX = 0;
+    int m_dragLastY = 0;
+    bool m_dragActive = false;
+
     bool m_visible = false;
     bool m_keyboardFocus = false;
     bool m_cefStarted = false;
