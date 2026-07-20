@@ -5,7 +5,7 @@
   },
   "id": "pcpapc172.chromium-in-gd",
   "name": "Chromium in GD",
-  "version": "v2.0.1",
+  "version": "v2.1.0",
   "developer": "PCPAPC172",
   "description": "A Chromium (CEF) browser rendered inside Geometry Dash with tabs, audio, microphone access, Discord support, and DevTools. Works in fullscreen.",
   "early-load": true,
