@@ -181,6 +181,18 @@ private:
     IMPLEMENT_REFCOUNTING(GdCefApp);
 };
 
+// Custom context-menu commands we add for links/images (CEF's windowless
+// model only carries the generic page items). IDs live in the user range so
+// they don't collide with CEF's built-in command ids.
+enum {
+    CMD_OPEN_LINK_NEW_TAB = MENU_ID_USER_FIRST,
+    CMD_COPY_LINK_ADDRESS,
+    CMD_SAVE_LINK_AS,
+    CMD_OPEN_IMAGE_NEW_TAB,
+    CMD_SAVE_IMAGE_AS,
+    CMD_COPY_IMAGE_ADDRESS,
+};
+
 }  // namespace
 
 class GdCefClient final : public CefClient,
@@ -204,6 +216,65 @@ public:
     CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
     CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
     CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
+
+    // CEF's windowless model only carries the generic page items (Back,
+    // Forward, Print, View source, and edit commands). The link/image entries
+    // are a Chrome-UI-layer feature not present here, so add them from the
+    // typed context params — the same data Chrome uses to build its menu.
+    void OnBeforeContextMenu(
+        CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, CefRefPtr<CefContextMenuParams> params,
+        CefRefPtr<CefMenuModel> model
+    ) override {
+        bool hasLink = !params->GetLinkUrl().empty();
+        bool hasImage = params->GetMediaType() == CM_MEDIATYPE_IMAGE || params->HasImageContents();
+        if (!hasLink && !hasImage) return;
+
+        int idx = 0;
+        if (hasLink) {
+            model->InsertItemAt(idx++, CMD_OPEN_LINK_NEW_TAB, "Open link in new tab");
+            model->InsertItemAt(idx++, CMD_COPY_LINK_ADDRESS, "Copy link address");
+            model->InsertItemAt(idx++, CMD_SAVE_LINK_AS, "Save link as...");
+        }
+        if (hasImage) {
+            if (idx) model->InsertSeparatorAt(idx++);
+            model->InsertItemAt(idx++, CMD_OPEN_IMAGE_NEW_TAB, "Open image in new tab");
+            model->InsertItemAt(idx++, CMD_SAVE_IMAGE_AS, "Save image as...");
+            model->InsertItemAt(idx++, CMD_COPY_IMAGE_ADDRESS, "Copy image address");
+        }
+        model->InsertSeparatorAt(idx++);
+    }
+
+    // Handle the commands we added above; return false for CEF's built-ins so
+    // it runs them itself.
+    bool OnContextMenuCommand(
+        CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>, CefRefPtr<CefContextMenuParams> params,
+        int commandId, EventFlags
+    ) override {
+        std::string link = params->GetLinkUrl().ToString();
+        std::string src = params->GetSourceUrl().ToString();
+        switch (commandId) {
+            case CMD_OPEN_LINK_NEW_TAB:
+                geode::queueInMainThread([link] { BrowserHost::get().addTab(link); });
+                return true;
+            case CMD_OPEN_IMAGE_NEW_TAB:
+                geode::queueInMainThread([src] { BrowserHost::get().addTab(src); });
+                return true;
+            case CMD_COPY_LINK_ADDRESS:
+                geode::queueInMainThread([link] { geode::utils::clipboard::write(link); });
+                return true;
+            case CMD_COPY_IMAGE_ADDRESS:
+                geode::queueInMainThread([src] { geode::utils::clipboard::write(src); });
+                return true;
+            case CMD_SAVE_LINK_AS:
+                if (!link.empty()) browser->GetHost()->StartDownload(link);
+                return true;
+            case CMD_SAVE_IMAGE_AS:
+                if (!src.empty()) browser->GetHost()->StartDownload(src);
+                return true;
+            default:
+                return false;
+        }
+    }
 
     // CEF's default context menu is a native popup that doesn't render in
     // off-screen mode, so render our own in-game menu from the model instead.
