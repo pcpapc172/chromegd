@@ -1,42 +1,77 @@
 # Chromium in GD
 
-A Windows-only Chromium browser overlay for Geometry Dash **2.2081** and Geode **5.8.2**.
+A Windows-only Chromium browser rendered **inside** Geometry Dash **2.2081** (Geode **5.8.2**).
 
-The frame follows Relog's floating-window idea: it stays above scenes, can be dragged by its top strip, resized from the lower-right handle, and remembers its size and position. The page area is a real WebView2 Chromium surface attached to the Geometry Dash window.
+Unlike a native child window bolted onto the game, the page is rendered by the
+**Chromium Embedded Framework** in off-screen (windowless) mode: every frame CEF
+paints is uploaded to an OpenGL texture and drawn as part of the GD scene. This
+is what makes it work **in fullscreen** — a real child HWND gets blanked by
+Windows' "fullscreen optimizations", which is the bug that motivated the switch
+away from WebView2.
+
+The frame floats above every scene, is dragged by its top bar, resized from the
+lower-right handle, and remembers its size and position across launches.
 
 ## Features
 
-- Multiple tabs, links that request a new window open as a new tab
-- Address/search box, back, forward, reload, and close-tab controls
-- Per-tab mute
-- Chromium DevTools (`Tools`)
-- Persistent cookies, logins, cache, and site data in the mod save directory
-- Audio, video, downloads, clipboard, context menus, and JavaScript dialogs
-- Microphone/camera access for Discord voice chat (controlled by the mod setting)
+- **Works in fullscreen** (off-screen rendering, not a native overlay window)
+- Multiple tabs; links that open a new window become new tabs; middle-click a tab to close it
+- Address/search bar with clear (✕) and copy buttons, back / forward / reload, loading spinner
+- Mouse side buttons (X1/X2) navigate back / forward
+- Downloads and browsing history, both persisted across launches, in a `...` menu
+- In-page right-click context menus and JavaScript dialogs, rendered in-game (no native popups that minimize the game)
+- Per-tab mute; DevTools
+- Persistent cookies, logins, cache and site data in the mod save directory
+- Microphone / camera access (for Discord voice), gated by a mod setting
+- Emulated Pointer Lock so mouse-look browser games (e.g. `classic.minecraft.net`) work under off-screen rendering
+- Keyboard, jump and pause input are kept in the browser while it has focus, so typing never leaks into the level
 - Tabs can keep running while the frame is hidden
-- Default shortcut: **Ctrl+F2**
+- Configurable home page, new-tab page, and toggle keybind (default **Ctrl+F2**)
 
 ## Build (Windows)
 
-Requirements: Visual Studio 2022 Build Tools with Desktop C++, CMake, Ninja, Geode CLI, and Geode SDK 5.8.2.
+Requirements: Visual Studio 2022+ Build Tools with the Desktop C++ workload,
+CMake, the Geode CLI, and Geode SDK 5.8.2. Build from inside the VS
+`vcvars64` environment so the correct toolchain is on `PATH`:
 
 ```powershell
 $env:GEODE_SDK = "C:\path\to\geode"
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+& "C:\Program Files (x86)\Microsoft Visual Studio\<version>\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+geode build
 ```
 
-CMake downloads the official Microsoft WebView2 SDK package and statically links its loader. It does not bundle a browser runtime. Windows 10/11 normally already has the Evergreen WebView2 Runtime; if startup reports that it is missing, install the Evergreen Runtime from Microsoft's official WebView2 download page.
+### CEF binaries
 
-The resulting `.geode` package is placed in the build output and can be installed with:
+The build expects a CEF distribution in `cef/` (headers, `libcef.dll`, the
+wrapper sources, and the resource/locale files). CI downloads the matching
+minimal build automatically:
 
-```powershell
-geode mod install build\pcpapc172.chromium-in-gd.geode
+```
+cef_binary_150.0.11+gb887805+chromium-150.0.7871.115_windows64_minimal
 ```
 
-## Important behavior
+`libcef_dll_wrapper` is compiled from source by this project's `CMakeLists.txt`
+rather than using CEF's own CMake, so the wrapper builds cleanly under the CI
+clang toolchain (CEF's packaged flags are MSVC-only). `libcef.dll` is
+delay-loaded and located at runtime with `LoadLibraryExW`.
 
-This is a native child Chromium window, not a Cocos texture imitation. That is what makes Discord voice, IME/text input, video acceleration, downloads, browser menus, and DevTools practical. Because of that, the first release targets Windows only and the browser surface is briefly hidden while its frame is being dragged or resized.
+## How it works
 
-The microphone/camera toggle automatically grants those two permission kinds to sites you visit. Keep it disabled when browsing untrusted pages. Other permissions stay on WebView2's default behavior.
+- A `CefClient` implements the render, life-span, display, load, download,
+  context-menu, permission and JS-dialog handlers. Rendering is windowless:
+  `OnPaint` hands back a BGRA buffer that the game thread uploads to a
+  `CCTexture2D` via `glTexSubImage2D`.
+- The page is super-sampled (2× device scale reported to CEF, downscaled on
+  display) so text stays crisp instead of softly upscaled.
+- A subclassed `WndProc` forwards mouse and keyboard input to CEF and, together
+  with `GJBaseGameLayer`/`PauseLayer` hooks, stops that input from also reaching
+  the game while the browser has focus or the cursor is over the window.
+- Pointer Lock is emulated in injected JS plus a virtual-cursor warp, because
+  CEF has no native pointer lock under off-screen rendering.
 
+## Notes
+
+This is the first release line, so it is Windows-only. The microphone/camera
+setting grants those two permission kinds automatically to sites you visit —
+keep it disabled when browsing untrusted pages. Some sites that actively block
+embedded browsers (e.g. TikTok's captcha) will still refuse to load.
